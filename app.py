@@ -34,30 +34,7 @@ def generate():
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
 
-    # STEP 1: NSFW CHECK
-    nsfw_url = "https://text2video.aritek.app/nsfw"
-    nsfw_payload = {
-        'prompt': prompt,
-        'ctry_target': 'others',
-        'versionCode': '72',
-        'deviceID': DEVICE_ID,
-        'isPremium': '0'
-    }
-
-    try:
-        nsfw_res = requests.post(nsfw_url, data=nsfw_payload, headers=HEADERS)
-        nsfw_data = nsfw_res.json()
-
-        if nsfw_data.get('code') != 0 or not nsfw_data.get('success'):
-            return jsonify({"error": "NSFW check failed"}), 400
-
-        if nsfw_data['data'][0].get('nsfw'):
-            return jsonify({"error": "Prompt flagged as NSFW"}), 400
-
-    except Exception as e:
-        return jsonify({"error": f"NSFW error: {str(e)}"}), 500
-
-    # STEP 2: GENERATE KEY
+    # STEP 1: GENERATE KEY
     txt2video_url = "https://text2video.aritek.app/txt2videov3"
     payload = {
         "ai_sound": 1,
@@ -74,26 +51,32 @@ def generate():
     headers_json['content-type'] = "application/json; charset=utf-8"
 
     try:
-        res = requests.post(txt2video_url, data=json.dumps(payload), headers=headers_json)
+        res = requests.post(txt2video_url, data=json.dumps(payload), headers=headers_json, timeout=30)
         data = res.json()
 
         if data.get('code') != 0:
-            return jsonify({"error": "Video generation failed"}), 400
+            return jsonify({
+                "error": "Video generation failed",
+                "upstream_code": data.get('code'),
+                "upstream_message": data.get('msg') or data.get('message'),
+                "raw": data
+            }), 400
 
         video_key = data.get("key")
         if not video_key:
-            return jsonify({"error": "No video key"}), 400
+            return jsonify({"error": "No video key", "raw": data}), 400
 
     except Exception as e:
         return jsonify({"error": f"Key error: {str(e)}"}), 500
 
-    # STEP 3: FETCH VIDEO
+    # STEP 2: FETCH VIDEO
     video_url_api = "https://text2video.aritek.app/video"
     video_payload = {"keys": [video_key]}
 
-    for _ in range(10):
+    last_error = None
+    for attempt in range(20):
         try:
-            res = requests.post(video_url_api, data=json.dumps(video_payload), headers=headers_json)
+            res = requests.post(video_url_api, data=json.dumps(video_payload), headers=headers_json, timeout=30)
             data = res.json()
 
             if data.get("code") == 0 and data.get("datas"):
@@ -108,14 +91,21 @@ def generate():
                         "filename": filename,
                         "safe": video_info.get("safe", "unknown")
                     })
+            else:
+                last_error = data
 
             time.sleep(3)
 
         except Exception as e:
-            return jsonify({"error": f"Fetch error: {str(e)}"}), 500
+            last_error = str(e)
+            time.sleep(3)
 
-    return jsonify({"error": "Timeout"}), 500
+    return jsonify({
+        "error": "Timeout: video not ready",
+        "key": video_key,
+        "last_response": last_error
+    }), 500
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=5000)
